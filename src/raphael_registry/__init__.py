@@ -1,0 +1,1 @@
+"""raphael-registry package."""

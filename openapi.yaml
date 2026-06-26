@@ -1,0 +1,12 @@
+openapi: 3.1.0
+info:
+  title: raphael-registry
+  version: 0.1.0
+  description: Open publish/install for adapters, workflows, agents, templates
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
