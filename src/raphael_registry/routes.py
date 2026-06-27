@@ -1,48 +1,61 @@
-"""API routes for raphael-registry."""
+"""API routes for raphael-registry — semver manifests and module pins."""
 
 from __future__ import annotations
 
-import os
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from raphael_registry.store import RegistryStore
+
 router = APIRouter(tags=["raphael-registry"])
-_db = Path(os.environ.get("RAPHAEL_REGISTRY_DB", "/tmp/raphael-registry.db"))
-_conn = sqlite3.connect(_db, check_same_thread=False)
-_conn.execute(
-    """CREATE TABLE IF NOT EXISTS items (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        body TEXT,
-        created_at TEXT NOT NULL
-    )"""
-)
-_conn.commit()
-_items: list[dict[str, Any]] = []
+_store = RegistryStore()
+
+
+def _publish_event(event_type: str, data: dict[str, Any]) -> None:
+    try:
+        from raphael_contracts.kafka import publish_event
+
+        publish_event(event_type, data, source="raphael-registry")
+    except Exception:
+        pass
 
 
 @router.get("")
-def list_items() -> dict[str, Any]:
-    rows = _conn.execute("SELECT id, name, body, created_at FROM items ORDER BY created_at DESC").fetchall()
-    return {"service": "raphael-registry", "items": [{"id": r[0], "name": r[1], "body": r[2], "created_at": r[3]} for r in rows]}
+def list_entries() -> dict[str, Any]:
+    return {"service": "raphael-registry", "items": _store.list()}
 
 
 @router.post("")
-def create_item(body: dict[str, Any]) -> dict[str, Any]:
-    iid = body.get("id", f"item-{int(datetime.now(timezone.utc).timestamp())}")
-    now = datetime.now(timezone.utc).isoformat()
-    _conn.execute("INSERT INTO items (id, name, body, created_at) VALUES (?, ?, ?, ?)", (iid, body.get("name", iid), body.get("body", ""), now))
-    _conn.commit()
-    return {"id": iid, "name": body.get("name", iid), "created_at": now}
+def create_entry(body: dict[str, Any]) -> dict[str, Any]:
+    name = body.get("name") or body.get("id", "entry")
+    version = body.get("version", "0.1.0")
+    try:
+        entry = _store.create(
+            name=name,
+            version=version,
+            manifest=body.get("manifest"),
+            module_pins=body.get("module_pins"),
+            entry_id=body.get("id"),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    _publish_event(
+        "raphael.registry.published",
+        {
+            "id": entry["id"],
+            "name": entry["name"],
+            "version": entry["version"],
+            "module_pins": entry.get("module_pins", []),
+            "created_at": entry.get("created_at"),
+        },
+    )
+    return entry
 
 
-@router.get("/{item_id}")
-def get_item(item_id: str) -> dict[str, Any]:
-    row = _conn.execute("SELECT id, name, body, created_at FROM items WHERE id = ?", (item_id,)).fetchone()
+@router.get("/{entry_id}")
+def get_entry(entry_id: str) -> dict[str, Any]:
+    row = _store.get(entry_id)
     if not row:
         raise HTTPException(404, detail="not_found")
-    return {"id": row[0], "name": row[1], "body": row[2], "created_at": row[3]}
+    return row
